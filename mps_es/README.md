@@ -5,9 +5,14 @@ Silicon (MPS)**, CPU, or a single CUDA GPU.
 
 This is **not** a replacement for `es_at_scale/`. The supported trainer needs
 vLLM, Ray, NCCL and multiple CUDA GPUs, and is what you should use on a
-cluster. This module exists because none of that runs on a Mac: `vllm==0.11.0`
-publishes only `manylinux` wheels, so `pip install -e .` fails on macOS before
-you even reach the CUDA requirement.
+cluster.
+
+vLLM has never published a macOS wheel: 0 of 95 releases on PyPI, latest 0.27.1.
+So `pip install -e .` cannot succeed on Apple Silicon. vLLM does document an
+experimental build-from-source path for macOS, but it is CPU only with no Metal
+backend and supports FP32/FP16 only, which gives up the throughput that is the
+reason to reach for vLLM at all. This module takes the other route: drop the
+serving layer and run the ES loop directly on MPS.
 
 Nothing outside this directory is modified. `es_at_scale/`, `archive/`,
 `setup.py` and `datasets/` are untouched; the countdown grader and the on-disk
@@ -103,7 +108,11 @@ Qwen2.5-0.5B-Instruct, bf16, MPS, 256 new tokens, on an M5 Max:
 | 200 | 1714 | 14.9 min |
 
 Noise generation is not a bottleneck: MPS draws ~36 G samples/s, about 0.4 s per
-iteration at 0.5B. On CPU it is ~200× slower and would dominate.
+iteration at 0.5B. On CPU it is ~200 times slower and would dominate.
+
+MPS matters for generation too, though less dramatically. Same model, batch 16,
+128 new tokens: MPS bf16 426 tok/s versus CPU fp32 137 tok/s, so about 3 times
+faster.
 
 For scale: the paper's reference Countdown run is 500 iterations × population 30
 × 200 prompts × 512 tokens ≈ 3 million rollouts on 8 GPUs. At batch 200 and 512
