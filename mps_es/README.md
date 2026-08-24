@@ -128,9 +128,22 @@ Names mirror `es_at_scale/train.py` where they overlap. Additions:
 | `--device` | autodetect | `mps` → `cuda` → `cpu` |
 | `--precision` | `bf16` | `fp32` avoids the drift described below |
 | `--resume` | none | path to a checkpoint |
-| `--eval-samples` | `100` | of the 2000-row eval split; `-1` for all |
+| `--eval-samples` | `500` | of the 2000-row eval split; `-1` for all |
 | `--decorrelate-layers` | off | see below |
 | `--checkpoint-freq` | `10` | `0` disables |
+
+## A trap worth knowing about
+
+Eval accuracy is a proportion, so its noise is `sqrt(p(1-p)/n)`. At 100 samples
+and ~10% accuracy that is **3 points**, which is enough to look like a hard
+plateau. A 200-iteration run here reported six consecutive evals of exactly
+0.0700 and appeared stuck; measured on 500 held-out prompts the same checkpoint
+was at **0.1100**. The default is now 500 (about 1.3 points), and the run prints
+its own resolution at startup.
+
+Greedy decoding makes this worse, not better: eval is deterministic, so a small
+fixed prompt subset returns byte-identical results until a weight change happens
+to flip one of those specific decodes.
 
 ## Two fidelity notes
 

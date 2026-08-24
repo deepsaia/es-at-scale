@@ -81,6 +81,18 @@ def score_batch(responses: Sequence[str], targets: Sequence[Dict[str, Any]]) -> 
     )
 
 
+def eval_standard_error(n_samples: int, accuracy: float = 0.1) -> float:
+    """Roughly how much an eval accuracy reading can move by chance alone.
+
+    Binomial standard error sqrt(p(1-p)/n). At n=100 and p=0.1 this is 3 points,
+    which is large enough that a small eval set reads as a plateau when the
+    underlying model is still improving.
+    """
+    if n_samples <= 0:
+        return 0.0
+    return (accuracy * (1.0 - accuracy) / n_samples) ** 0.5
+
+
 def to_prompts_and_targets(rows: Sequence[Dict[str, Any]]) -> Tuple[List[str], List[Dict]]:
     """Split dataset rows into prompts and grader targets (upstream's collate_fn)."""
     prompts = [row["context"] for row in rows]
@@ -126,8 +138,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="memory lever only; does not change the result")
     p.add_argument("--max-tokens", type=int, default=256)
     p.add_argument("--eval-freq", type=int, default=10, help="0 disables evaluation")
-    p.add_argument("--eval-samples", type=int, default=100,
-                   help="prompts from the 2000-row eval split; -1 for all")
+    p.add_argument("--eval-samples", type=int, default=500,
+                   help="prompts from the 2000-row eval split; -1 for all. "
+                        "Below ~250 the reading is too noisy to track progress")
     p.add_argument("--train-dataset", default=str(REPO_ROOT / "datasets/train/countdown"))
     p.add_argument("--eval-dataset",
                    default=str(REPO_ROOT / "datasets/evaluation_suite/countdown"))
@@ -161,6 +174,13 @@ def main(argv=None) -> int:
     if args.eval_samples >= 0 and args.eval_samples < len(eval_rows):
         print(f"[eval] using {args.eval_samples} of {len(eval_rows)} eval prompts")
         eval_rows = eval_rows[: args.eval_samples]
+    if args.eval_freq:
+        se = eval_standard_error(len(eval_rows)) * 100
+        print(f"[eval] {len(eval_rows)} prompts, +/- {se:.1f} points of noise "
+              f"at ~10% accuracy")
+        if se > 2.0:
+            print("[eval] that is coarse enough to look like a plateau; "
+                  "raise --eval-samples to track progress")
 
     train_prompts, train_targets = to_prompts_and_targets(train_rows)
     eval_prompts, eval_targets = to_prompts_and_targets(eval_rows)
