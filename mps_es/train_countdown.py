@@ -13,6 +13,7 @@ the package (installing it would pull vLLM, which has no macOS wheel):
 
 import argparse
 import json
+import multiprocessing
 import sys
 import time
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ from mps_es.trainer import ESHyperparams, run_iteration  # noqa: E402
 
 __all__ = [
     "BatchScore",
+    "TimedGrader",
     "score_batch",
     "score_responses",
     "write_eval_outputs",
@@ -53,8 +55,54 @@ class BatchScore:
     mean_answer_reward: float = 0.0
 
 
+def _worker_ready() -> bool:
+    return True
+
+
+class TimedGrader:
+    """Runs a reward function in a worker process with a time limit.
+
+    The countdown grader evaluates the model's arithmetic expression with
+    Python, and a long enough expression can take unbounded time. Upstream runs
+    the grader in a process pool and scores a timed-out response as zero. This
+    does the same. A worker left busy by a timed-out call is replaced.
+    """
+
+    TIMED_OUT = {
+        "formatted": False,
+        "format_reward": 0.0,
+        "answer_reward": 0.0,
+        "timed_out": True,
+    }
+
+    def __init__(self, fn, timeout: float):
+        self._fn = fn
+        self._timeout = timeout
+        self._ctx = multiprocessing.get_context("spawn")
+        self._pool = self._start_pool()
+
+    def _start_pool(self):
+        pool = self._ctx.Pool(1)
+        pool.apply(_worker_ready)  # wait for the worker to start, so the limit covers grading only
+        return pool
+
+    def __call__(self, response: str, target: Dict[str, Any]):
+        pending = self._pool.apply_async(self._fn, (response, target))
+        try:
+            return pending.get(self._timeout)
+        except multiprocessing.TimeoutError:
+            self._pool.terminate()
+            self._pool = self._start_pool()
+            return dict(self.TIMED_OUT), 0.0
+
+    def close(self) -> None:
+        self._pool.terminate()
+
+
 def score_responses(
-    responses: Sequence[str], targets: Sequence[Dict[str, Any]]
+    responses: Sequence[str],
+    targets: Sequence[Dict[str, Any]],
+    grader=countdown_reward_fn,
 ) -> List[Dict[str, Any]]:
     """Grade each response and return one record per prompt.
 
@@ -69,7 +117,7 @@ def score_responses(
         )
     records = []
     for response, target in zip(responses, targets):
-        detail, reward = countdown_reward_fn(response, target)
+        detail, reward = grader(response, target)
         records.append(
             {
                 "target": target,
@@ -83,7 +131,11 @@ def score_responses(
     return records
 
 
-def score_batch(responses: Sequence[str], targets: Sequence[Dict[str, Any]]) -> BatchScore:
+def score_batch(
+    responses: Sequence[str],
+    targets: Sequence[Dict[str, Any]],
+    grader=countdown_reward_fn,
+) -> BatchScore:
     """Score one batch of completions.
 
     `mean_reward` (0.1 * format + answer) is what ES optimises; `accuracy` is the
@@ -94,7 +146,7 @@ def score_batch(responses: Sequence[str], targets: Sequence[Dict[str, Any]]) -> 
     one that is actually solving the puzzle -- format credit saturates at 0.1,
     so early progress is all envelope.
     """
-    return summarise_records(score_responses(responses, targets))
+    return summarise_records(score_responses(responses, targets, grader))
 
 
 def summarise_records(records: Sequence[Dict[str, Any]]) -> BatchScore:
@@ -138,7 +190,12 @@ def to_prompts_and_targets(rows: Sequence[Dict[str, Any]]) -> Tuple[List[str], L
 
 
 def evaluate_split(
-    runner, prompts, targets, mini_batch_size, output_path: Path = None
+    runner,
+    prompts,
+    targets,
+    mini_batch_size,
+    output_path: Path = None,
+    grader=countdown_reward_fn,
 ) -> BatchScore:
     """Greedily answer every prompt in the split and grade the answers.
 
@@ -152,7 +209,8 @@ def evaluate_split(
         chunk_prompts = prompts[start : start + mini_batch_size]
         chunk_targets = targets[start : start + mini_batch_size]
         responses = runner.generate(chunk_prompts, mini_batch_size=mini_batch_size)
-        for prompt, record in zip(chunk_prompts, score_responses(responses, chunk_targets)):
+        graded = score_responses(responses, chunk_targets, grader)
+        for prompt, record in zip(chunk_prompts, graded):
             records.append({"prompt": prompt, **record})
     if output_path is not None:
         write_eval_outputs(output_path, records)
@@ -199,6 +257,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-directory", default=str(REPO_ROOT / "experiments"))
     p.add_argument("--experiment-name", default=None)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--reward-function-timeout", type=int, default=10,
+                   help="seconds before a grader call is scored as zero; 0 grades inline")
     # additions over upstream
     p.add_argument("--device", default=None, help="mps / cuda / cpu (autodetected)")
     p.add_argument("--precision", default="bf16", choices=["fp32", "bf16", "fp16"])
@@ -265,6 +325,10 @@ def main(argv=None) -> int:
     config = {k: v for k, v in vars(args).items()}
     config["alpha"] = alpha
 
+    grader = countdown_reward_fn
+    if args.reward_function_timeout > 0:
+        grader = TimedGrader(countdown_reward_fn, args.reward_function_timeout)
+
     def log(record: Dict[str, Any]) -> None:
         with metrics_path.open("a") as f:
             f.write(json.dumps(record) + "\n")
@@ -278,7 +342,7 @@ def main(argv=None) -> int:
     # Skipped on resume because the baseline was recorded by the original run.
     if args.eval_freq and start_iteration == 0:
         score = evaluate_split(runner, eval_prompts, eval_targets, args.mini_batch_size,
-                               output_path=eval_dir / "eval_baseline.json")
+                               output_path=eval_dir / "eval_baseline.json", grader=grader)
         log({"iteration": 0, "baseline": True,
              "eval_accuracy": score.accuracy, "eval_mean_reward": score.mean_reward})
         print(f"[eval base] accuracy={score.accuracy:.4f} "
@@ -300,7 +364,7 @@ def main(argv=None) -> int:
 
         def evaluate() -> float:
             responses = runner.generate(prompts, mini_batch_size=args.mini_batch_size)
-            score = score_batch(responses, targets)
+            score = score_batch(responses, targets, grader)
             member_scores.append(score)
             return score.mean_reward
 
@@ -328,7 +392,8 @@ def main(argv=None) -> int:
 
         if args.eval_freq and (iteration + 1) % args.eval_freq == 0:
             score = evaluate_split(runner, eval_prompts, eval_targets, args.mini_batch_size,
-                                   output_path=eval_dir / f"eval_iteration{iteration + 1}.json")
+                                   output_path=eval_dir / f"eval_iteration{iteration + 1}.json",
+                                   grader=grader)
             record["eval_accuracy"] = score.accuracy
             record["eval_mean_reward"] = score.mean_reward
             print(f"[eval {iteration:4d}] accuracy={score.accuracy:.4f} "
@@ -343,6 +408,8 @@ def main(argv=None) -> int:
 
     save_checkpoint(checkpoint_path, iteration=args.n_iterations,
                     model=runner.model, rng=rng, config=config)
+    if isinstance(grader, TimedGrader):
+        grader.close()
     print(f"[done] metrics -> {metrics_path}")
     return 0
 

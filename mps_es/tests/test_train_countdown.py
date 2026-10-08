@@ -131,3 +131,53 @@ def test_evaluate_split_result_does_not_depend_on_mini_batch_size():
     chunked = evaluate_split(_ScriptedRunner(responses), prompts, targets, mini_batch_size=2)
 
     assert whole == chunked
+
+
+def _grade_or_hang(response, target):
+    """Stand-in grader: hangs on one specific response, grades the rest."""
+    if response == "hang":
+        import time
+        time.sleep(30)
+    from es_at_scale.reward_function.countdown_grader import countdown_reward_fn
+    return countdown_reward_fn(response, target)
+
+
+def test_timed_grader_passes_normal_grades_through():
+    from mps_es.train_countdown import TimedGrader
+
+    grader = TimedGrader(_grade_or_hang, timeout=20)
+    try:
+        detail, reward = grader(CORRECT, target())
+    finally:
+        grader.close()
+
+    assert reward == pytest.approx(1.1)
+    assert detail["answer_reward"] == 1.0
+
+
+def test_timed_grader_scores_a_hung_call_as_zero_and_keeps_working():
+    from mps_es.train_countdown import TimedGrader
+
+    grader = TimedGrader(_grade_or_hang, timeout=1)
+    try:
+        detail, reward = grader("hang", target())
+        _, after = grader(CORRECT, target())
+    finally:
+        grader.close()
+
+    assert reward == 0.0
+    assert detail["timed_out"] is True
+    assert after == pytest.approx(1.1)
+
+
+def test_score_batch_uses_the_given_grader():
+    calls = []
+
+    def grader(response, target):
+        calls.append(response)
+        return {"format_reward": 1.0, "answer_reward": 1.0}, 1.1
+
+    result = score_batch([UNFORMATTED], [target()], grader)
+
+    assert calls == [UNFORMATTED]
+    assert result.accuracy == 1.0
