@@ -151,3 +151,41 @@ def test_apply_update_with_zero_z_scores_leaves_parameters_unchanged():
 
     for p, o in zip(params, original):
         assert torch.allclose(p, o, atol=1e-12)
+
+
+def test_apply_update_in_bf16_matches_a_float32_accumulated_reference():
+    """Upstream sums every seed's share of the update in float32 and casts once.
+    Adding each share straight into a bf16 weight would round most of it away,
+    because one share is far below the resolution of bf16 at weight scale."""
+    seeds = list(range(30))
+    z = np.ones(30)  # coherent shares, so the lost signal would be large
+    alpha = 0.03
+    params = [torch.ones(64, 32, dtype=torch.bfloat16)]
+    original = [p.clone() for p in params]
+
+    apply_update_(params, seeds=seeds, z_scores=z, alpha=alpha)
+
+    expected = []
+    for o in original:
+        total = torch.zeros(o.shape, dtype=torch.float32)
+        for seed, zn in zip(seeds, z):
+            g = torch.Generator()
+            g.manual_seed(seed)
+            total += torch.randn(o.shape, dtype=o.dtype, generator=g).float() * zn
+        # upstream casts the float32 total to the model dtype, then adds it
+        expected.append(o + ((alpha / len(seeds)) * total).to(torch.bfloat16))
+
+    for p, e in zip(params, expected):
+        assert torch.equal(p, e)
+
+
+def test_apply_update_in_bf16_does_not_lose_the_update_to_rounding():
+    """Thirty identical shares each below half a bf16 ulp must still add up."""
+    seeds = [5] * 30
+    params = [torch.ones(64, 32, dtype=torch.bfloat16)]
+    original = params[0].clone()
+
+    apply_update_(params, seeds=seeds, z_scores=np.ones(30), alpha=0.03)
+
+    changed = (params[0] != original).float().mean().item()
+    assert changed > 0.5, f"only {changed:.0%} of weights moved"

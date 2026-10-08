@@ -100,8 +100,11 @@ def apply_update_(
 ) -> None:
     """theta += alpha * mean_n(z_n * noise(seed_n)), in place.
 
-    Accumulated seed by seed and layer by layer rather than by materialising the
-    full update, so peak memory stays at one layer.
+    One layer at a time: the contributions of all seeds are summed in a float32
+    buffer and added to the layer once, as upstream does. Each seed's share of
+    the update is far smaller than the resolution of a bf16 weight, so adding
+    them one by one in the model's own dtype would round most of them away.
+    Peak extra memory is one layer in float32 plus one layer of noise.
     """
     params = list(params)
     n = len(seeds)
@@ -112,11 +115,18 @@ def apply_update_(
             f"seeds and z_scores must be the same length, got {n} and {len(z_scores)}"
         )
 
-    for seed, z in zip(seeds, z_scores):
-        coefficient = alpha * float(z) / n
-        if coefficient == 0.0:
-            continue
-        _add_scaled_noise_(params, seed, coefficient, decorrelate_layers)
+    scale = float(alpha) / n
+    for layer_index, param in enumerate(params):
+        total = torch.zeros_like(param, dtype=torch.float32)
+        for seed, z in zip(seeds, z_scores):
+            if float(z) == 0.0:
+                continue
+            noise = _noise_like(param, _layer_seed(seed, layer_index, decorrelate_layers))
+            total.add_(noise.to(torch.float32), alpha=float(z))
+            del noise
+        total.mul_(scale)
+        param.add_(total.to(param.dtype))
+        del total
 
 
 def zscore(rewards: Sequence[float]) -> np.ndarray:
