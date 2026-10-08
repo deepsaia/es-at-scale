@@ -8,6 +8,14 @@ The defining property is that perturbation noise is never stored -- only the
 seed that generates it. Perturb, restore and update all re-derive the identical
 noise from that seed, which is what keeps memory flat regardless of population
 size.
+
+This file repeats the perturb, restore and update maths from
+`es_at_scale/utils/worker_extension.py`. The upstream versions are methods on a
+class that vLLM mixes into its GPU worker, and they read the parameters from the
+vLLM model runner, so they cannot be imported here. Moving that maths into one
+shared module that both the vLLM worker and this file call would remove the
+duplication. That is left for a separate change so this one touches nothing
+outside `mps_es/`.
 """
 
 from typing import Iterable, List, Sequence
