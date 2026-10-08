@@ -32,10 +32,17 @@ from mps_es.checkpoint import (  # noqa: E402
     next_seeds,
     save_checkpoint,
 )
-from mps_es.runner import load_runner, resolve_device, weighted_mean  # noqa: E402
+from mps_es.runner import load_runner, resolve_device  # noqa: E402
 from mps_es.trainer import ESHyperparams, run_iteration  # noqa: E402
 
-__all__ = ["BatchScore", "score_batch", "to_prompts_and_targets", "main"]
+__all__ = [
+    "BatchScore",
+    "score_batch",
+    "score_responses",
+    "write_eval_outputs",
+    "to_prompts_and_targets",
+    "main",
+]
 
 
 @dataclass
@@ -44,6 +51,36 @@ class BatchScore:
     accuracy: float
     mean_format_reward: float = 0.0
     mean_answer_reward: float = 0.0
+
+
+def score_responses(
+    responses: Sequence[str], targets: Sequence[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Grade each response and return one record per prompt.
+
+    Each record carries the response, its target, the total reward and the two
+    reward components. `score_batch` averages these; the eval step also writes
+    them to disk so individual model outputs can be read later, which is what
+    the upstream trainer does in its eval-output directory.
+    """
+    if len(responses) != len(targets):
+        raise ValueError(
+            f"got {len(responses)} responses for {len(targets)} targets"
+        )
+    records = []
+    for response, target in zip(responses, targets):
+        detail, reward = countdown_reward_fn(response, target)
+        records.append(
+            {
+                "target": target,
+                "response": response,
+                "reward": float(reward),
+                "format_reward": float(detail["format_reward"]),
+                "answer_reward": float(detail["answer_reward"]),
+                "correct": detail["answer_reward"] == 1.0,
+            }
+        )
+    return records
 
 
 def score_batch(responses: Sequence[str], targets: Sequence[Dict[str, Any]]) -> BatchScore:
@@ -57,28 +94,28 @@ def score_batch(responses: Sequence[str], targets: Sequence[Dict[str, Any]]) -> 
     one that is actually solving the puzzle -- format credit saturates at 0.1,
     so early progress is all envelope.
     """
-    if len(responses) != len(targets):
-        raise ValueError(
-            f"got {len(responses)} responses for {len(targets)} targets"
-        )
-    if not responses:
+    return summarise_records(score_responses(responses, targets))
+
+
+def summarise_records(records: Sequence[Dict[str, Any]]) -> BatchScore:
+    """Average per-prompt records into one BatchScore."""
+    if not records:
         return BatchScore(mean_reward=0.0, accuracy=0.0)
-
-    rewards, formats, answers, correct = [], [], [], 0
-    for response, target in zip(responses, targets):
-        detail, reward = countdown_reward_fn(response, target)
-        rewards.append(reward)
-        formats.append(detail["format_reward"])
-        answers.append(detail["answer_reward"])
-        correct += int(detail["answer_reward"] == 1.0)
-
-    n = len(responses)
+    n = len(records)
     return BatchScore(
-        mean_reward=sum(rewards) / n,
-        accuracy=correct / n,
-        mean_format_reward=sum(formats) / n,
-        mean_answer_reward=sum(answers) / n,
+        mean_reward=sum(r["reward"] for r in records) / n,
+        accuracy=sum(int(r["correct"]) for r in records) / n,
+        mean_format_reward=sum(r["format_reward"] for r in records) / n,
+        mean_answer_reward=sum(r["answer_reward"] for r in records) / n,
     )
+
+
+def write_eval_outputs(path: Path, records: Sequence[Dict[str, Any]]) -> None:
+    """Save every eval response and its grade as one JSON file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+        json.dump(list(records), f, indent=2)
 
 
 def eval_standard_error(n_samples: int, accuracy: float = 0.1) -> float:
@@ -100,25 +137,26 @@ def to_prompts_and_targets(rows: Sequence[Dict[str, Any]]) -> Tuple[List[str], L
     return prompts, targets
 
 
-def evaluate_split(runner, prompts, targets, mini_batch_size) -> BatchScore:
-    """Score a whole split in chunks, recombining exactly as one pass would."""
-    means, accuracies, formats, answers, sizes = [], [], [], [], []
+def evaluate_split(
+    runner, prompts, targets, mini_batch_size, output_path: Path = None
+) -> BatchScore:
+    """Greedily answer every prompt in the split and grade the answers.
+
+    Generation runs in chunks of `mini_batch_size` to bound memory. The grade is
+    computed over all prompts at once, so the chunk size does not change the
+    result. When `output_path` is given, every response and its grade is
+    written there as JSON.
+    """
+    records: List[Dict[str, Any]] = []
     for start in range(0, len(prompts), mini_batch_size):
         chunk_prompts = prompts[start : start + mini_batch_size]
         chunk_targets = targets[start : start + mini_batch_size]
         responses = runner.generate(chunk_prompts, mini_batch_size=mini_batch_size)
-        score = score_batch(responses, chunk_targets)
-        means.append(score.mean_reward)
-        accuracies.append(score.accuracy)
-        formats.append(score.mean_format_reward)
-        answers.append(score.mean_answer_reward)
-        sizes.append(len(chunk_prompts))
-    return BatchScore(
-        mean_reward=weighted_mean(means, sizes),
-        accuracy=weighted_mean(accuracies, sizes),
-        mean_format_reward=weighted_mean(formats, sizes),
-        mean_answer_reward=weighted_mean(answers, sizes),
-    )
+        for prompt, record in zip(chunk_prompts, score_responses(responses, chunk_targets)):
+            records.append({"prompt": prompt, **record})
+    if output_path is not None:
+        write_eval_outputs(output_path, records)
+    return summarise_records(records)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -126,7 +164,19 @@ def build_parser() -> argparse.ArgumentParser:
         description="ES fine-tuning for Countdown on Apple Silicon / CPU / CUDA.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    # names mirror es_at_scale/train.py so the upstream README transfers
+    # Flag names match es_at_scale/train.py.
+    #
+    # The training steps are the same as upstream. Only some default values are
+    # smaller, to suit a single device:
+    #
+    #   flag              upstream default              default here
+    #   --model-name      Qwen/Qwen2.5-1.5B-Instruct    Qwen/Qwen2.5-0.5B-Instruct
+    #   --n-iterations    300                           50
+    #   --batch-size      200 (the whole train split)   32
+    #   --max-tokens      512                           256
+    #   --eval-samples    all 2000 eval prompts         500
+    #
+    # Pass the upstream values on the command line to run the full configuration.
     p.add_argument("--model-name", default="Qwen/Qwen2.5-0.5B-Instruct")
     p.add_argument("--sigma", type=float, default=0.001)
     p.add_argument("--alpha", type=float, default=-1, help="defaults to sigma/2")
@@ -138,9 +188,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="memory lever only; does not change the result")
     p.add_argument("--max-tokens", type=int, default=256)
     p.add_argument("--eval-freq", type=int, default=10, help="0 disables evaluation")
+    # Upstream evaluates on the whole eval split. A subset is used here to keep
+    # eval time down. The run prints the sampling noise of the chosen size at
+    # startup; too small a subset reads as a plateau.
     p.add_argument("--eval-samples", type=int, default=500,
-                   help="prompts from the 2000-row eval split; -1 for all. "
-                        "Below ~250 the reading is too noisy to track progress")
+                   help="prompts from the 2000-row eval split; -1 for all")
     p.add_argument("--train-dataset", default=str(REPO_ROOT / "datasets/train/countdown"))
     p.add_argument("--eval-dataset",
                    default=str(REPO_ROOT / "datasets/evaluation_suite/countdown"))
@@ -217,6 +269,21 @@ def main(argv=None) -> int:
         with metrics_path.open("a") as f:
             f.write(json.dumps(record) + "\n")
 
+    # Every eval writes each response and its grade to this directory, as the
+    # upstream trainer does, so individual outputs can be inspected later.
+    eval_dir = out_dir / "eval-output"
+
+    # Upstream evaluates the untouched model before the first update. Do the
+    # same, so the first eval after training has a baseline to compare against.
+    # Skipped on resume because the baseline was recorded by the original run.
+    if args.eval_freq and start_iteration == 0:
+        score = evaluate_split(runner, eval_prompts, eval_targets, args.mini_batch_size,
+                               output_path=eval_dir / "eval_baseline.json")
+        log({"iteration": 0, "baseline": True,
+             "eval_accuracy": score.accuracy, "eval_mean_reward": score.mean_reward})
+        print(f"[eval base] accuracy={score.accuracy:.4f} "
+              f"mean_reward={score.mean_reward:.4f}")
+
     # a fixed slice per iteration, as upstream does: every member sees the same prompts
     cursor = (start_iteration * batch_size) % max(1, len(train_prompts))
 
@@ -260,7 +327,8 @@ def main(argv=None) -> int:
               f"ans={mean_answer:.4f} best_acc={best_accuracy:.3f} ({elapsed:.0f}s)")
 
         if args.eval_freq and (iteration + 1) % args.eval_freq == 0:
-            score = evaluate_split(runner, eval_prompts, eval_targets, args.mini_batch_size)
+            score = evaluate_split(runner, eval_prompts, eval_targets, args.mini_batch_size,
+                                   output_path=eval_dir / f"eval_iteration{iteration + 1}.json")
             record["eval_accuracy"] = score.accuracy
             record["eval_mean_reward"] = score.mean_reward
             print(f"[eval {iteration:4d}] accuracy={score.accuracy:.4f} "

@@ -4,9 +4,17 @@ Scoring is the part with real logic: mean reward drives ES, while accuracy
 (exact-answer rate) is the number comparable to the paper's Table 1.
 """
 
+import json
+
 import pytest
 
-from mps_es.train_countdown import score_batch, to_prompts_and_targets
+from mps_es.train_countdown import (
+    evaluate_split,
+    score_batch,
+    score_responses,
+    to_prompts_and_targets,
+    write_eval_outputs,
+)
 
 
 CORRECT = "</think>\n<answer> (44 + 19) + 35 </answer>"
@@ -67,3 +75,59 @@ def test_to_prompts_and_targets_splits_dataset_rows():
 
     assert prompts == ["prompt one", "prompt two"]
     assert targets == [{"numbers": [1, 2], "target": 3}, {"numbers": [4, 5], "target": 9}]
+
+
+def test_score_responses_returns_one_graded_record_per_response():
+    records = score_responses([CORRECT, WRONG], [target(), target()])
+
+    assert [r["correct"] for r in records] == [True, False]
+    assert records[0]["reward"] == pytest.approx(1.1)
+    assert records[0]["response"] == CORRECT
+    assert records[0]["target"] == target()
+
+
+def test_write_eval_outputs_saves_records_as_json(tmp_path):
+    path = tmp_path / "eval-output" / "eval_baseline.json"
+    records = score_responses([CORRECT], [target()])
+
+    write_eval_outputs(path, records)
+
+    saved = json.loads(path.read_text())
+    assert saved[0]["response"] == CORRECT
+    assert saved[0]["correct"] is True
+
+
+class _ScriptedRunner:
+    """Returns fixed responses so eval can be tested without a model."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+
+    def generate(self, prompts, mini_batch_size):
+        out, self._responses = self._responses[: len(prompts)], self._responses[len(prompts):]
+        return out
+
+
+def test_evaluate_split_grades_every_prompt_and_writes_each_response(tmp_path):
+    runner = _ScriptedRunner([CORRECT, WRONG, UNFORMATTED])
+    prompts = ["p1", "p2", "p3"]
+    targets = [target(), target(), target()]
+    out = tmp_path / "eval_iteration1.json"
+
+    score = evaluate_split(runner, prompts, targets, mini_batch_size=2, output_path=out)
+
+    assert score.accuracy == pytest.approx(1 / 3)
+    saved = json.loads(out.read_text())
+    assert [r["prompt"] for r in saved] == prompts
+    assert [r["correct"] for r in saved] == [True, False, False]
+
+
+def test_evaluate_split_result_does_not_depend_on_mini_batch_size():
+    responses = [CORRECT, WRONG, UNFORMATTED, CORRECT, WRONG]
+    prompts = [f"p{i}" for i in range(5)]
+    targets = [target() for _ in range(5)]
+
+    whole = evaluate_split(_ScriptedRunner(responses), prompts, targets, mini_batch_size=5)
+    chunked = evaluate_split(_ScriptedRunner(responses), prompts, targets, mini_batch_size=2)
+
+    assert whole == chunked
