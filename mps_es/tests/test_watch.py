@@ -98,3 +98,27 @@ def test_summarise_does_not_claim_answer_credit_below_the_ceiling():
 
 def test_summarise_of_no_rows_says_so_rather_than_crashing():
     assert summarise([]) != ""
+
+
+def test_summarise_counts_the_baseline_row_as_an_eval_but_not_an_iteration():
+    rows = [
+        {"iteration": 0, "baseline": True, "eval_accuracy": 0.01, "eval_mean_reward": 0.05},
+        {"iteration": 0, "mean_reward": 0.03, "max_reward": 0.05},
+        {"iteration": 1, "mean_reward": 0.04, "max_reward": 0.05,
+         "eval_accuracy": 0.02, "eval_mean_reward": 0.09},
+    ]
+
+    text = summarise(rows)
+
+    assert "2 evals" in text
+    assert "2 iterations" in text
+    assert "baseline" in text
+
+
+def test_summarise_with_only_the_baseline_row_reports_it():
+    rows = [{"iteration": 0, "baseline": True, "eval_accuracy": 0.01, "eval_mean_reward": 0.05}]
+
+    text = summarise(rows)
+
+    assert "baseline" in text
+    assert "0.0100" in text

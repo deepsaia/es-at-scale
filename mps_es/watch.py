@@ -69,6 +69,14 @@ def summarise(rows: Sequence[Dict[str, Any]]) -> str:
     if not rows:
         return "no metrics yet"
 
+    # The baseline eval row, written before the first update, has no training
+    # metrics. It counts as an eval but not as an iteration.
+    evals = [r for r in rows if "eval_accuracy" in r]
+    rows = [r for r in rows if "mean_reward" in r]
+    if not rows:
+        baseline = evals[-1]
+        return f"baseline eval  accuracy={baseline['eval_accuracy']:.4f}  (no iterations yet)"
+
     latest = rows[-1]
     rewards = [r["mean_reward"] for r in rows]
     lines = [
@@ -84,12 +92,12 @@ def summarise(rows: Sequence[Dict[str, Any]]) -> str:
             f"best_member_acc={latest.get('best_member_accuracy', 0.0):.3f}"
         )
 
-    evals = [r for r in rows if "eval_accuracy" in r]
     if evals:
         accuracies = [r["eval_accuracy"] for r in evals]
         lines.append(
             f"eval    {sparkline(accuracies)}  accuracy={accuracies[-1]:.4f}"
-            f" (iter {evals[-1]['iteration']}, {len(evals)} evals)"
+            f" (iter {evals[-1]['iteration']}, {len(evals)} evals"
+            f"{', first is baseline' if evals[0].get('baseline') else ''})"
         )
 
     over = [r for r in rows if r.get("max_reward", 0.0) > FORMAT_CEILING]
