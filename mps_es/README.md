@@ -23,12 +23,14 @@ python -m mps_es.train_countdown --n-iterations 50
 python -m mps_es.train_countdown --n-iterations 200 --resume experiments/<name>/checkpoint.pt
 python -m mps_es.train_math --model-name Qwen/Qwen2.5-Math-7B --n-iterations 0   # baseline eval only
 python -m mps_es.train_math --model-name Qwen/Qwen2.5-Math-7B --n-iterations 100
-python -m mps_es.watch experiments/<name> --follow
+python -m mps_es.watch experiments/<name> -f        # live status; -v for detail
 python -m pytest mps_es/tests -q
 ```
 
-Output goes to `experiments/<name>/`: `metrics.jsonl`, `checkpoint.pt`, and
-`eval-output/*.json` with every eval response and its grade. The untouched model
+Output goes to `experiments/<name>/`: `metrics.jsonl`, `checkpoint.pt`,
+`eval-output/*.json` with every eval response and its grade, and two small
+files the watcher reads: `run.json` (settings) and `status.json` (current
+phase and progress). The untouched model
 is evaluated once before training starts. Resume restores the weights, the
 iteration counter and the seed stream.
 
