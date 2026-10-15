@@ -155,3 +155,57 @@ def test_perturbing_trainable_params_changes_the_live_model(runner, tiny_model):
 
     with torch.no_grad():  # leave the module-scoped fixture as we found it
         params[0].sub_(torch.ones_like(params[0]))
+
+
+class _RecordingModel:
+    """Stands in for a model: records generate() kwargs, echoes the prompt."""
+
+    def __init__(self, eos_token_id):
+        from types import SimpleNamespace
+        self.generation_config = SimpleNamespace(eos_token_id=eos_token_id)
+        self.calls = []
+
+    def generate(self, input_ids, attention_mask, **kwargs):
+        self.calls.append(kwargs)
+        return input_ids
+
+
+def test_stop_token_ids_adds_end_of_turn_to_a_base_models_end_of_text(tokenizer):
+    from mps_es.runner import stop_token_ids
+
+    base_model = _RecordingModel(eos_token_id=tokenizer.eos_token_id)
+
+    ids = stop_token_ids(tokenizer, base_model)
+
+    assert tokenizer.eos_token_id in ids
+    assert tokenizer.convert_tokens_to_ids("<|im_end|>") in ids
+
+
+def test_stop_token_ids_keeps_a_list_of_configured_stops_without_duplicates(tokenizer):
+    from mps_es.runner import stop_token_ids
+
+    end_of_turn = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    instruct_model = _RecordingModel(eos_token_id=[tokenizer.eos_token_id, end_of_turn])
+
+    ids = stop_token_ids(tokenizer, instruct_model)
+
+    assert ids == sorted({tokenizer.eos_token_id, end_of_turn})
+
+
+def test_generate_passes_the_stop_tokens_to_the_model(tokenizer):
+    model = _RecordingModel(eos_token_id=tokenizer.eos_token_id)
+    runner = ModelRunner(model=model, tokenizer=tokenizer, device="cpu",
+                         max_new_tokens=4, stop_token_ids=[1, 2])
+
+    runner.generate(["hello"], mini_batch_size=1)
+
+    assert model.calls[0]["eos_token_id"] == [1, 2]
+
+
+def test_generate_leaves_the_models_own_stops_alone_when_none_are_given(tokenizer):
+    model = _RecordingModel(eos_token_id=tokenizer.eos_token_id)
+    runner = ModelRunner(model=model, tokenizer=tokenizer, device="cpu", max_new_tokens=4)
+
+    runner.generate(["hello"], mini_batch_size=1)
+
+    assert "eos_token_id" not in model.calls[0]
