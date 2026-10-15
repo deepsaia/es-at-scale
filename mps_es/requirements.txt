@@ -15,5 +15,9 @@ latex2sympy2_extended
 pylatexenc
 sympy
 
+# watcher
+typer>=0.12
+rich>=13
+
 # tests
 pytest>=7.0
