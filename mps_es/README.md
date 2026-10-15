@@ -21,6 +21,8 @@ From the repository root:
 ```bash
 python -m mps_es.train_countdown --n-iterations 50
 python -m mps_es.train_countdown --n-iterations 200 --resume experiments/<name>/checkpoint.pt
+python -m mps_es.train_math --model-name Qwen/Qwen2.5-Math-7B --n-iterations 0   # baseline eval only
+python -m mps_es.train_math --model-name Qwen/Qwen2.5-Math-7B --n-iterations 100
 python -m mps_es.watch experiments/<name> --follow
 python -m pytest mps_es/tests -q
 ```
@@ -29,6 +31,13 @@ Output goes to `experiments/<name>/`: `metrics.jsonl`, `checkpoint.pt`, and
 `eval-output/*.json` with every eval response and its grade. The untouched model
 is evaluated once before training starts. Resume restores the weights, the
 iteration counter and the seed stream.
+
+Both upstream tasks are here: `train_countdown` and `train_math`. The math
+task uses the repo's boxed-answer grader and Qwen math template, trains on the
+MATH level 3 to 5 split and evaluates each split of the math suite separately,
+with `math500` as the headline. Its reward is binary, so the starting model
+must already solve some training problems; run with `--n-iterations 0` first
+to see the baseline.
 
 ## Same as upstream
 
