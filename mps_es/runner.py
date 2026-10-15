@@ -15,8 +15,14 @@ __all__ = [
     "load_runner",
     "resolve_device",
     "resolve_dtype",
+    "stop_token_ids",
     "weighted_mean",
 ]
+
+# Marks the end of an assistant turn in the Qwen chat format. Base models list
+# only <|endoftext|> as their stop token, so without this a chat-formatted
+# answer runs on past its end into junk until the token limit.
+END_OF_TURN_TOKEN = "<|im_end|>"
 
 _DTYPES = {
     "fp32": torch.float32,
@@ -43,6 +49,27 @@ def resolve_device(preferred: Optional[str] = None) -> str:
     if torch.cuda.is_available():
         return "cuda"
     return "cpu"
+
+
+def stop_token_ids(tokenizer, model) -> List[int]:
+    """Token ids at which generation stops.
+
+    The model's own stop tokens, plus the chat end-of-turn token when the
+    tokenizer knows it. Instruct models already list both; base models list
+    only end-of-text.
+    """
+    ids = set()
+    configured = getattr(model.generation_config, "eos_token_id", None)
+    if isinstance(configured, int):
+        ids.add(configured)
+    elif configured is not None:
+        ids.update(int(i) for i in configured)
+    if tokenizer.eos_token_id is not None:
+        ids.add(tokenizer.eos_token_id)
+    end_of_turn = tokenizer.convert_tokens_to_ids(END_OF_TURN_TOKEN)
+    if end_of_turn is not None and end_of_turn != tokenizer.unk_token_id:
+        ids.add(end_of_turn)
+    return sorted(ids)
 
 
 def iter_minibatches(items: Sequence, size: int) -> Iterator[List]:
@@ -79,11 +106,13 @@ class ModelRunner:
         tokenizer,
         device: str,
         max_new_tokens: int,
+        stop_token_ids: Optional[List[int]] = None,
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
         self.max_new_tokens = max_new_tokens
+        self.stop_token_ids = stop_token_ids
 
     def trainable_params(self) -> List[torch.Tensor]:
         return [p.data for p in self.model.parameters()]
@@ -99,6 +128,9 @@ class ModelRunner:
             encoded = self.tokenizer(
                 chunk, return_tensors="pt", padding=True
             ).to(self.device)
+            stop = {}
+            if self.stop_token_ids:
+                stop["eos_token_id"] = self.stop_token_ids
             generated = self.model.generate(
                 **encoded,
                 max_new_tokens=self.max_new_tokens,
@@ -107,6 +139,7 @@ class ModelRunner:
                 top_p=None,
                 top_k=None,
                 pad_token_id=self.tokenizer.pad_token_id,
+                **stop,
             )
             # strip the prompt: everything up to the (left-padded) input width
             new_tokens = generated[:, encoded["input_ids"].shape[1] :]
@@ -140,5 +173,9 @@ def load_runner(
     model.requires_grad_(False)  # ES never differentiates; saves autograd bookkeeping
 
     return ModelRunner(
-        model=model, tokenizer=tokenizer, device=device, max_new_tokens=max_new_tokens
+        model=model,
+        tokenizer=tokenizer,
+        device=device,
+        max_new_tokens=max_new_tokens,
+        stop_token_ids=stop_token_ids(tokenizer, model),
     )
