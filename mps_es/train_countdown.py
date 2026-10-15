@@ -34,6 +34,7 @@ from mps_es.checkpoint import (  # noqa: E402
     save_checkpoint,
 )
 from mps_es.runner import load_runner, resolve_device  # noqa: E402
+from mps_es.status import RunStatus  # noqa: E402
 from mps_es.trainer import ESHyperparams, run_iteration  # noqa: E402
 
 __all__ = [
@@ -196,13 +197,14 @@ def evaluate_split(
     mini_batch_size,
     output_path: Path = None,
     grader=countdown_reward_fn,
+    progress=None,
 ) -> BatchScore:
     """Greedily answer every prompt in the split and grade the answers.
 
     Generation runs in chunks of `mini_batch_size` to bound memory. The grade is
     computed over all prompts at once, so the chunk size does not change the
     result. When `output_path` is given, every response and its grade is
-    written there as JSON.
+    written there as JSON. `progress(done, total)` is called after each chunk.
     """
     records: List[Dict[str, Any]] = []
     for start in range(0, len(prompts), mini_batch_size):
@@ -212,6 +214,8 @@ def evaluate_split(
         graded = score_responses(responses, chunk_targets, grader)
         for prompt, record in zip(chunk_prompts, graded):
             records.append({"prompt": prompt, **record})
+        if progress is not None:
+            progress(len(records), len(prompts))
     if output_path is not None:
         write_eval_outputs(output_path, records)
     return summarise_records(records)
@@ -303,6 +307,10 @@ def main(argv=None) -> int:
     print(f"[setup] device={device} precision={args.precision} model={args.model_name}")
     print(f"[setup] pop={args.population_size} sigma={args.sigma} alpha={alpha} "
           f"batch={batch_size} max_tokens={args.max_tokens}")
+    # run.json and status.json in the run directory are what `mps_es.watch`
+    # reads to show progress between metrics rows.
+    status = RunStatus(out_dir)
+    status.update("loading", model_name=args.model_name)
     runner = load_runner(args.model_name, device, args.precision, args.max_tokens)
     params = runner.trainable_params()
 
@@ -324,6 +332,13 @@ def main(argv=None) -> int:
 
     config = {k: v for k, v in vars(args).items()}
     config["alpha"] = alpha
+    status.start(
+        task="countdown", model_name=args.model_name, device=device,
+        precision=args.precision, n_iterations=args.n_iterations,
+        start_iteration=start_iteration, population_size=args.population_size,
+        batch_size=batch_size, max_tokens=args.max_tokens, eval_freq=args.eval_freq,
+        eval_samples=len(eval_prompts), resumed_from=args.resume,
+    )
 
     grader = countdown_reward_fn
     if args.reward_function_timeout > 0:
@@ -340,9 +355,14 @@ def main(argv=None) -> int:
     # Upstream evaluates the untouched model before the first update. Do the
     # same, so the first eval after training has a baseline to compare against.
     # Skipped on resume because the baseline was recorded by the original run.
+    def run_eval(tag: str, iteration: int) -> BatchScore:
+        status.update("eval", tag=tag, iteration=iteration, done=0, total=len(eval_prompts))
+        return evaluate_split(runner, eval_prompts, eval_targets, args.mini_batch_size,
+                              output_path=eval_dir / f"eval_{tag}.json", grader=grader,
+                              progress=lambda done, total: status.progress(done=done, total=total))
+
     if args.eval_freq and start_iteration == 0:
-        score = evaluate_split(runner, eval_prompts, eval_targets, args.mini_batch_size,
-                               output_path=eval_dir / "eval_baseline.json", grader=grader)
+        score = run_eval("baseline", 0)
         log({"iteration": 0, "baseline": True,
              "eval_accuracy": score.accuracy, "eval_mean_reward": score.mean_reward})
         print(f"[eval base] accuracy={score.accuracy:.4f} "
@@ -361,8 +381,10 @@ def main(argv=None) -> int:
         cursor = (cursor + batch_size) % len(train_prompts)
 
         member_scores: List[BatchScore] = []
+        status.update("train", iteration=iteration, member=0, population=hp.population_size)
 
         def evaluate() -> float:
+            status.progress(member=len(member_scores) + 1)
             responses = runner.generate(prompts, mini_batch_size=args.mini_batch_size)
             score = score_batch(responses, targets, grader)
             member_scores.append(score)
@@ -391,9 +413,7 @@ def main(argv=None) -> int:
               f"ans={mean_answer:.4f} best_acc={best_accuracy:.3f} ({elapsed:.0f}s)")
 
         if args.eval_freq and (iteration + 1) % args.eval_freq == 0:
-            score = evaluate_split(runner, eval_prompts, eval_targets, args.mini_batch_size,
-                                   output_path=eval_dir / f"eval_iteration{iteration + 1}.json",
-                                   grader=grader)
+            score = run_eval(f"iteration{iteration + 1}", iteration + 1)
             record["eval_accuracy"] = score.accuracy
             record["eval_mean_reward"] = score.mean_reward
             print(f"[eval {iteration:4d}] accuracy={score.accuracy:.4f} "
@@ -408,6 +428,7 @@ def main(argv=None) -> int:
 
     save_checkpoint(checkpoint_path, iteration=args.n_iterations,
                     model=runner.model, rng=rng, config=config)
+    status.update("done", iteration=args.n_iterations)
     if isinstance(grader, TimedGrader):
         grader.close()
     print(f"[done] metrics -> {metrics_path}")

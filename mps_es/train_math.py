@@ -41,6 +41,7 @@ from mps_es.checkpoint import (  # noqa: E402
     save_checkpoint,
 )
 from mps_es.runner import load_runner, resolve_device  # noqa: E402
+from mps_es.status import RunStatus  # noqa: E402
 from mps_es.train_countdown import (  # noqa: E402
     BatchScore,
     TimedGrader,
@@ -118,12 +119,14 @@ def evaluate_splits(
     eval_dir: Path = None,
     tag: str = "",
     grader=boxed_reward_fn,
+    progress=None,
 ) -> Dict[str, BatchScore]:
     """Greedily answer every prompt in every split and grade the answers.
 
     Upstream evaluates each split of the math suite separately and reports it
     under its own name. This does the same. When `eval_dir` is given, every
     response and its grade is written to `<eval_dir>/eval_<tag>_<split>.json`.
+    `progress(split, done, total)` is called after each chunk.
     """
     scores: Dict[str, BatchScore] = {}
     for name, (prompts, targets) in splits.items():
@@ -135,6 +138,8 @@ def evaluate_splits(
             graded = score_responses(responses, chunk_targets, grader)
             for prompt, record in zip(chunk_prompts, graded):
                 records.append({"prompt": prompt, **record})
+            if progress is not None:
+                progress(name, len(records), len(prompts))
         if eval_dir is not None:
             write_eval_outputs(Path(eval_dir) / f"eval_{tag}_{name}.json", records)
         scores[name] = summarise_records(records)
@@ -252,6 +257,10 @@ def main(argv=None) -> int:
     print(f"[setup] device={device} precision={args.precision} model={args.model_name}")
     print(f"[setup] pop={args.population_size} sigma={args.sigma} alpha={alpha} "
           f"batch={batch_size} max_tokens={args.max_tokens}")
+    # run.json and status.json in the run directory are what `mps_es.watch`
+    # reads to show progress between metrics rows.
+    status = RunStatus(out_dir)
+    status.update("loading", model_name=args.model_name)
     runner = load_runner(args.model_name, device, args.precision, args.max_tokens)
     params = runner.trainable_params()
 
@@ -273,6 +282,14 @@ def main(argv=None) -> int:
 
     config = {k: v for k, v in vars(args).items()}
     config["alpha"] = alpha
+    status.start(
+        task="math", model_name=args.model_name, device=device,
+        precision=args.precision, n_iterations=args.n_iterations,
+        start_iteration=start_iteration, population_size=args.population_size,
+        batch_size=batch_size, max_tokens=args.max_tokens, eval_freq=args.eval_freq,
+        eval_splits={name: len(prompts) for name, (prompts, _) in eval_splits.items()},
+        headline_split=headline, resumed_from=args.resume,
+    )
 
     # The symbolic checker behind the grader can take unbounded time on odd
     # LaTeX, so it runs in a worker with a time limit, as upstream does.
@@ -288,9 +305,13 @@ def main(argv=None) -> int:
     # upstream trainer does, so individual outputs can be inspected later.
     eval_dir = out_dir / "eval-output"
 
-    def run_eval(tag: str) -> Dict[str, float]:
-        scores = evaluate_splits(runner, eval_splits, args.mini_batch_size,
-                                 eval_dir=eval_dir, tag=tag, grader=grader)
+    def run_eval(tag: str, iteration: int) -> Dict[str, float]:
+        status.update("eval", tag=tag, iteration=iteration, split="", done=0, total=0)
+        scores = evaluate_splits(
+            runner, eval_splits, args.mini_batch_size, eval_dir=eval_dir, tag=tag,
+            grader=grader,
+            progress=lambda split, done, total: status.progress(split=split, done=done, total=total),
+        )
         for split, s in scores.items():
             print(f"[eval {tag}] {split}: accuracy={s.accuracy:.4f} "
                   f"boxed={s.mean_format_reward:.3f}")
@@ -300,7 +321,7 @@ def main(argv=None) -> int:
     # same, so the first eval after training has a baseline to compare against.
     # Skipped on resume because the baseline was recorded by the original run.
     if args.eval_freq and start_iteration == 0:
-        log({"iteration": 0, "baseline": True, **run_eval("baseline")})
+        log({"iteration": 0, "baseline": True, **run_eval("baseline", 0)})
 
     # a fixed slice per iteration, as upstream does: every member sees the same prompts
     cursor = (start_iteration * batch_size) % max(1, len(train_prompts))
@@ -313,8 +334,10 @@ def main(argv=None) -> int:
         cursor = (cursor + batch_size) % len(train_prompts)
 
         member_scores: List[BatchScore] = []
+        status.update("train", iteration=iteration, member=0, population=hp.population_size)
 
         def evaluate() -> float:
+            status.progress(member=len(member_scores) + 1)
             responses = runner.generate(prompts, mini_batch_size=args.mini_batch_size)
             score = score_batch(responses, targets, grader)
             member_scores.append(score)
@@ -342,7 +365,7 @@ def main(argv=None) -> int:
               f"best_acc={best_accuracy:.3f} ({elapsed:.0f}s)")
 
         if args.eval_freq and (iteration + 1) % args.eval_freq == 0:
-            record.update(run_eval(f"iteration{iteration + 1}"))
+            record.update(run_eval(f"iteration{iteration + 1}", iteration + 1))
 
         log(record)
 
@@ -356,6 +379,7 @@ def main(argv=None) -> int:
     if args.n_iterations > start_iteration:
         save_checkpoint(checkpoint_path, iteration=args.n_iterations,
                         model=runner.model, rng=rng, config=config)
+    status.update("done", iteration=args.n_iterations)
     if isinstance(grader, TimedGrader):
         grader.close()
     print(f"[done] metrics -> {metrics_path}")
