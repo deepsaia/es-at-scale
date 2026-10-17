@@ -279,14 +279,16 @@ def _evals_table(report: Report) -> Table:
     return table
 
 
-def _settings_table(report: Report) -> Table:
-    table = Table(title="run settings", title_justify="left", show_header=False)
+def _settings_lines(report: Report) -> Table:
+    """Run settings and current status as two inline JSON lines."""
+    table = Table.grid(padding=(0, 2))
     table.add_column(style="dim")
     table.add_column()
-    for key, value in (report.run or {}).items():
-        if key == "started":
-            value = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(value)))
-        table.add_row(key, str(value))
+    run = dict(report.run or {})
+    if "started" in run:
+        run["started"] = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(run["started"])))
+    if run:
+        table.add_row("run settings", json.dumps(run, default=str))
     if report.status:
         table.add_row("status", json.dumps({k: v for k, v in report.status.items() if k != "updated"}))
     return table
@@ -301,7 +303,7 @@ def render(report: Report, verbose: bool = False) -> Group:
         if report.evals:
             parts += [Text(), _evals_table(report)]
         if report.run or report.status:
-            parts += [Text(), _settings_table(report)]
+            parts += [Text(), _settings_lines(report)]
     return Group(*parts)
 
 
