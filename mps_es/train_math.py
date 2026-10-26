@@ -42,6 +42,7 @@ from mps_es.checkpoint import (  # noqa: E402
 )
 from mps_es.runner import load_runner, resolve_device  # noqa: E402
 from mps_es.status import RunStatus  # noqa: E402
+# TODO(refactor): shared helpers imported from the countdown entry point; see the note on BatchScore in train_countdown.
 from mps_es.train_countdown import (  # noqa: E402
     BatchScore,
     TimedGrader,
@@ -62,6 +63,7 @@ __all__ = [
 ALL_EVAL_SPLITS = "math500,amc,aime,minerva,olympiad_bench"
 
 
+# TODO(refactor): same loop as train_countdown.score_responses; see the note there.
 def score_responses(
     responses: Sequence[str],
     targets: Sequence[Any],
@@ -112,6 +114,7 @@ def to_prompts_and_targets(rows: Sequence[Dict[str, Any]]) -> Tuple[List[str], L
     return prompts, targets
 
 
+# TODO(refactor): the inner chunk, grade, progress loop duplicates train_countdown.evaluate_split; see the note there.
 def evaluate_splits(
     runner,
     splits: Dict[str, Tuple[List[str], List[Any]]],
@@ -156,6 +159,7 @@ def eval_record(scores: Dict[str, BatchScore], headline: str) -> Dict[str, float
     return record
 
 
+# TODO(refactor): identical to train_countdown.build_parser apart from defaults and --eval-splits; see the note there.
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="ES fine-tuning for MATH on Apple Silicon / CPU / CUDA.",
@@ -212,6 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# TODO(refactor): train_countdown caps its eval rows inline in main with the same rule; share this loader.
 def load_eval_splits(path: str, names: Sequence[str], samples: int):
     """Load the requested splits of the eval suite, capped at `samples` each."""
     suite = load_from_disk(path)
@@ -226,6 +231,7 @@ def load_eval_splits(path: str, names: Sequence[str], samples: int):
     return splits
 
 
+# TODO(refactor): mirrors train_countdown.main; see the note there.
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     alpha = args.sigma / 2 if args.alpha < 0 else args.alpha

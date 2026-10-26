@@ -48,6 +48,7 @@ __all__ = [
 ]
 
 
+# TODO(refactor): BatchScore, TimedGrader, summarise_records, write_eval_outputs and eval_standard_error are task-agnostic; move them to a shared module instead of having train_math import them from this entry point.
 @dataclass
 class BatchScore:
     mean_reward: float
@@ -100,6 +101,7 @@ class TimedGrader:
         self._pool.terminate()
 
 
+# TODO(refactor): same loop as train_math.score_responses; only the format/answer extraction from the grader's detail differs, so pass that as a function.
 def score_responses(
     responses: Sequence[str],
     targets: Sequence[Dict[str, Any]],
@@ -190,6 +192,7 @@ def to_prompts_and_targets(rows: Sequence[Dict[str, Any]]) -> Tuple[List[str], L
     return prompts, targets
 
 
+# TODO(refactor): the chunk, grade, progress loop is repeated in train_math.evaluate_splits; one generic evaluate over (prompts, targets) would serve both.
 def evaluate_split(
     runner,
     prompts,
@@ -221,6 +224,7 @@ def evaluate_split(
     return summarise_records(records)
 
 
+# TODO(refactor): identical to train_math.build_parser apart from defaults and --eval-splits; build both from one parser with per-task defaults.
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="ES fine-tuning for Countdown on Apple Silicon / CPU / CUDA.",
@@ -273,6 +277,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# TODO(refactor): everything in main mirrors train_math.main (setup, resume, status, logging, loop, checkpoints); factor a task-agnostic run(args, task) that the two entry points parameterise.
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     alpha = args.sigma / 2 if args.alpha < 0 else args.alpha
@@ -380,6 +385,7 @@ def main(argv=None) -> int:
         targets = [train_targets[i] for i in window]
         cursor = (cursor + batch_size) % len(train_prompts)
 
+        # TODO(refactor): per-member bookkeeping is rebuilt around run_iteration here and in train_math; let run_iteration report each member's score through a callback.
         member_scores: List[BatchScore] = []
         status.update("train", iteration=iteration, member=0, population=hp.population_size)
 

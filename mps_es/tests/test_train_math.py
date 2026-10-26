@@ -61,6 +61,7 @@ def test_to_prompts_and_targets_wraps_the_problem_in_the_qwen_math_template():
     assert targets == ["2"]
 
 
+# TODO(refactor): duplicated in test_train_countdown; move to a conftest.py fixture.
 class _ScriptedRunner:
     """Returns fixed responses so eval can be tested without a model."""
 

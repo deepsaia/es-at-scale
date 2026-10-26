@@ -13,6 +13,7 @@ import torch
 from mps_es.es_loop import apply_update_, perturb_, restore_, zscore
 
 
+# TODO(refactor): a near-copy lives in test_trainer; share it through a conftest.py.
 def make_params(device="cpu", dtype=torch.float32):
     """A stand-in for a model's parameter list: mixed shapes, realistic scale."""
     torch.manual_seed(0)
@@ -90,6 +91,7 @@ def test_zscore_normalises_and_returns_zeros_for_a_degenerate_population():
     assert not np.any(np.isnan(flat))
 
 
+# TODO(refactor): the naive-update reference is rebuilt in test_trainer's leftover-noise test; a shared helper would keep the two in step.
 def test_apply_update_matches_naive_reference():
     """The decomposed seed-by-seed, layer-by-layer update must equal
     theta += alpha * mean_n(z_n * eps_n) computed the obvious way."""

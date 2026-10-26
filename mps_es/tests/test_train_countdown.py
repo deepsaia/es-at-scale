@@ -66,6 +66,7 @@ def test_score_responses_returns_one_graded_record_per_response():
     assert records[0]["target"] == target()
 
 
+# TODO(refactor): duplicated in test_train_math; move to a conftest.py fixture.
 class _ScriptedRunner:
     """Returns fixed responses so eval can be tested without a model."""
 

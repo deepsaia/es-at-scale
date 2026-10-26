@@ -85,6 +85,7 @@ def iter_minibatches(items: Sequence, size: int) -> Iterator[List]:
         yield list(items[start : start + size])
 
 
+# TODO(refactor): unused since the trainers grade a whole batch at once; delete it, its __all__ entry and the mention above.
 def weighted_mean(values: Sequence[float], weights: Sequence[float]) -> float:
     """Recombine per-chunk means into the mean over the undivided batch."""
     total = sum(weights)

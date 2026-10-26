@@ -16,6 +16,7 @@ from mps_es.runner import ModelRunner, iter_minibatches, resolve_dtype, stop_tok
 TOKENIZER_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
+# TODO(refactor): needs the Qwen tokenizer in the HF cache; a tiny tokenizer saved under tests/ would make this hermetic.
 @pytest.fixture(scope="module")
 def tokenizer():
     tok = AutoTokenizer.from_pretrained(TOKENIZER_ID, padding_side="left")

@@ -35,6 +35,7 @@ BLOCKS = "▁▂▃▄▅▆▇█"
 
 # Countdown only: format credit is weighted 0.1 and maxes at 1.0, so a member
 # mean above this needs answer credit -- the earliest sign of real solving.
+# TODO(refactor): restates the countdown grader's format weight; read it from the grader if upstream exposes it.
 FORMAT_CEILING = 0.1
 
 ETA_WINDOW = 10  # iterations averaged for the time estimate

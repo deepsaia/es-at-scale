@@ -26,6 +26,7 @@ import torch
 __all__ = ["perturb_", "restore_", "apply_update_", "zscore"]
 
 
+# TODO(refactor): this module repeats the maths of es_at_scale/utils/worker_extension.py; move both onto one shared module.
 def _layer_seed(seed: int, layer_index: int, decorrelate_layers: bool) -> int:
     """Seed for one layer's noise draw.
 

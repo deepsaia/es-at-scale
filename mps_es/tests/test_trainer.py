@@ -17,6 +17,7 @@ def hyperparams():
     return ESHyperparams(sigma=0.01, alpha=0.005, population_size=8)
 
 
+# TODO(refactor): see the note on make_params in test_es_loop.
 def make_params():
     torch.manual_seed(0)
     return [torch.randn(16, 8) * 0.02, torch.randn(8) * 0.02]
@@ -40,6 +41,7 @@ def test_run_iteration_scores_each_member_once_with_its_own_perturbed_weights(hy
     assert result.mean_reward == pytest.approx(0.45)
 
 
+# TODO(refactor): see the note on the naive-update reference in test_es_loop.
 def test_run_iteration_leaves_only_the_update_applied_not_leftover_noise(hyperparams):
     """After the population sweep every perturbation must have been restored, so
     the net change equals exactly the ES update and nothing else."""
