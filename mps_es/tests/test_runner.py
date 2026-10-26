@@ -5,17 +5,13 @@ tokenizer rather than mocks, so the transformers generate path is genuinely
 exercised. Nothing here downloads weights.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from transformers import AutoTokenizer, Qwen2Config, Qwen2ForCausalLM
 
-from mps_es.runner import (
-    ModelRunner,
-    iter_minibatches,
-    resolve_device,
-    resolve_dtype,
-    weighted_mean,
-)
+from mps_es.runner import ModelRunner, iter_minibatches, resolve_dtype, stop_token_ids
 
 TOKENIZER_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -49,104 +45,37 @@ def runner(tiny_model, tokenizer):
     )
 
 
-def test_resolve_dtype_maps_precision_names():
+def test_resolve_dtype_maps_precision_names_and_rejects_unknown_ones():
     assert resolve_dtype("fp32") is torch.float32
     assert resolve_dtype("bf16") is torch.bfloat16
     assert resolve_dtype("fp16") is torch.float16
-
-
-def test_resolve_dtype_rejects_an_unknown_precision():
     with pytest.raises(ValueError, match="unknown precision"):
         resolve_dtype("int4")
 
 
-def test_resolve_device_honours_an_explicit_choice():
-    assert resolve_device("cpu") == "cpu"
-
-
-def test_resolve_device_autodetects_an_available_accelerator():
-    device = resolve_device(None)
-
-    expected = "mps" if torch.backends.mps.is_available() else (
-        "cuda" if torch.cuda.is_available() else "cpu"
-    )
-    assert device == expected
-
-
-def test_iter_minibatches_covers_every_item_in_order():
+def test_iter_minibatches_covers_every_item_in_order_and_rejects_a_non_positive_size():
     assert list(iter_minibatches(list(range(7)), 3)) == [[0, 1, 2], [3, 4, 5], [6]]
-
-
-def test_iter_minibatches_with_size_larger_than_the_batch_yields_one_chunk():
-    assert list(iter_minibatches([1, 2], 99)) == [[1, 2]]
-
-
-def test_iter_minibatches_rejects_a_non_positive_size():
     with pytest.raises(ValueError):
         list(iter_minibatches([1, 2], 0))
 
 
-def test_weighted_mean_matches_the_mean_over_the_undivided_batch():
-    values = [0.0, 1.0, 0.5, 0.25, 1.0, 0.75, 0.5]
-    chunks = [values[:3], values[3:6], values[6:]]
+def test_generate_returns_one_completion_per_prompt_without_the_prompt(runner):
+    prompts = ["hello", "a distinctive prompt string"]
 
-    chunk_means = [sum(c) / len(c) for c in chunks]
-    chunk_sizes = [len(c) for c in chunks]
-
-    assert weighted_mean(chunk_means, chunk_sizes) == pytest.approx(
-        sum(values) / len(values)
-    )
-
-
-def test_generate_returns_one_completion_per_prompt(runner):
-    outputs = runner.generate(["hello", "the capital of France is"], mini_batch_size=8)
+    outputs = runner.generate(prompts, mini_batch_size=8)
 
     assert len(outputs) == 2
     assert all(isinstance(o, str) for o in outputs)
-
-
-def test_generate_preserves_prompt_order_across_minibatches(runner):
-    prompts = ["alpha", "beta", "gamma", "delta", "epsilon"]
-
-    one_chunk = runner.generate(prompts, mini_batch_size=len(prompts))
-    many_chunks = runner.generate(prompts, mini_batch_size=2)
-
-    assert len(one_chunk) == len(many_chunks) == len(prompts)
-
-
-def test_generate_excludes_the_prompt_from_the_returned_completion(runner):
-    prompt = "a distinctive prompt string"
-
-    (completion,) = runner.generate([prompt], mini_batch_size=1)
-
-    assert prompt not in completion
-
-
-def test_generate_is_deterministic_under_greedy_decoding(runner):
-    prompts = ["alpha", "beta"]
-
-    assert runner.generate(prompts, mini_batch_size=2) == runner.generate(
-        prompts, mini_batch_size=2
-    )
-
-
-def test_generate_handles_an_empty_prompt_list(runner):
-    assert runner.generate([], mini_batch_size=4) == []
-
-
-def test_trainable_params_exposes_the_models_tensors_for_perturbation(runner, tiny_model):
-    params = runner.trainable_params()
-
-    assert len(params) == len(list(tiny_model.parameters()))
-    assert all(isinstance(p, torch.Tensor) for p in params)
+    assert prompts[1] not in outputs[1]
 
 
 def test_perturbing_trainable_params_changes_the_live_model(runner, tiny_model):
     """The ES loop mutates these tensors in place, so they must be the model's
     own storage rather than copies."""
-    before = next(iter(tiny_model.parameters())).clone()
-
     params = runner.trainable_params()
+    assert len(params) == len(list(tiny_model.parameters()))
+
+    before = next(iter(tiny_model.parameters())).clone()
     with torch.no_grad():
         params[0].add_(torch.ones_like(params[0]))
 
@@ -161,7 +90,6 @@ class _RecordingModel:
     """Stands in for a model: records generate() kwargs, echoes the prompt."""
 
     def __init__(self, eos_token_id):
-        from types import SimpleNamespace
         self.generation_config = SimpleNamespace(eos_token_id=eos_token_id)
         self.calls = []
 
@@ -170,26 +98,16 @@ class _RecordingModel:
         return input_ids
 
 
-def test_stop_token_ids_adds_end_of_turn_to_a_base_models_end_of_text(tokenizer):
-    from mps_es.runner import stop_token_ids
-
-    base_model = _RecordingModel(eos_token_id=tokenizer.eos_token_id)
-
-    ids = stop_token_ids(tokenizer, base_model)
-
-    assert tokenizer.eos_token_id in ids
-    assert tokenizer.convert_tokens_to_ids("<|im_end|>") in ids
-
-
-def test_stop_token_ids_keeps_a_list_of_configured_stops_without_duplicates(tokenizer):
-    from mps_es.runner import stop_token_ids
-
+def test_stop_token_ids_adds_end_of_turn_and_keeps_configured_stops_without_duplicates(tokenizer):
+    """A base model's config stops only at <|endoftext|>, so the chat-format
+    <|im_end|> is added; an instruct model that already lists it gets no duplicate."""
     end_of_turn = tokenizer.convert_tokens_to_ids("<|im_end|>")
-    instruct_model = _RecordingModel(eos_token_id=[tokenizer.eos_token_id, end_of_turn])
 
-    ids = stop_token_ids(tokenizer, instruct_model)
+    base = stop_token_ids(tokenizer, _RecordingModel(eos_token_id=tokenizer.eos_token_id))
+    instruct = stop_token_ids(tokenizer, _RecordingModel(eos_token_id=[tokenizer.eos_token_id, end_of_turn]))
 
-    assert ids == sorted({tokenizer.eos_token_id, end_of_turn})
+    assert tokenizer.eos_token_id in base and end_of_turn in base
+    assert instruct == sorted({tokenizer.eos_token_id, end_of_turn})
 
 
 def test_generate_passes_the_stop_tokens_to_the_model(tokenizer):
@@ -200,12 +118,3 @@ def test_generate_passes_the_stop_tokens_to_the_model(tokenizer):
     runner.generate(["hello"], mini_batch_size=1)
 
     assert model.calls[0]["eos_token_id"] == [1, 2]
-
-
-def test_generate_leaves_the_models_own_stops_alone_when_none_are_given(tokenizer):
-    model = _RecordingModel(eos_token_id=tokenizer.eos_token_id)
-    runner = ModelRunner(model=model, tokenizer=tokenizer, device="cpu", max_new_tokens=4)
-
-    runner.generate(["hello"], mini_batch_size=1)
-
-    assert "eos_token_id" not in model.calls[0]

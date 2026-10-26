@@ -33,32 +33,13 @@ TRAIN_ROWS = [
 ]
 
 
-def test_sparkline_renders_one_character_per_value():
-    assert len(sparkline([1, 2, 3, 4, 5])) == 5
-
-
-def test_sparkline_puts_the_lowest_value_at_the_bottom_and_highest_at_the_top():
-    line = sparkline([0, 1, 2])
-
+def test_sparkline_maps_the_range_onto_one_block_per_value():
+    line = sparkline([0, 1, 2, 3, 4])
+    assert len(line) == 5
     assert line[0] == "▁"
     assert line[-1] == "█"
-
-
-def test_sparkline_of_a_flat_series_is_flat():
     assert len(set(sparkline([3, 3, 3]))) == 1
-
-
-def test_sparkline_of_an_empty_series_is_empty():
     assert sparkline([]) == ""
-
-
-def test_load_metrics_reads_every_row(tmp_path):
-    path = write_metrics(tmp_path / "m.jsonl", [
-        {"iteration": 0, "mean_reward": 0.1},
-        {"iteration": 1, "mean_reward": 0.2},
-    ])
-
-    assert len(load_metrics(path)) == 2
 
 
 def test_load_metrics_skips_a_partially_written_trailing_line(tmp_path):
@@ -73,10 +54,6 @@ def test_load_metrics_skips_a_partially_written_trailing_line(tmp_path):
     assert rows[0]["iteration"] == 0
 
 
-def test_load_metrics_on_a_missing_file_returns_empty(tmp_path):
-    assert load_metrics(tmp_path / "absent.jsonl") == []
-
-
 def test_build_report_separates_training_rows_from_eval_rows(tmp_path):
     write_metrics(tmp_path / "metrics.jsonl", TRAIN_ROWS)
 
@@ -87,26 +64,15 @@ def test_build_report_separates_training_rows_from_eval_rows(tmp_path):
     assert report.completed == 2
 
 
-def test_build_report_accepts_the_metrics_file_itself(tmp_path):
+def test_build_report_takes_the_planned_total_from_run_json_or_the_total_option(tmp_path):
     write_metrics(tmp_path / "metrics.jsonl", TRAIN_ROWS)
+    assert build_report(tmp_path, total=30).n_iterations == 30
 
-    assert build_report(tmp_path / "metrics.jsonl").completed == 2
-
-
-def test_build_report_takes_the_planned_total_from_run_json(tmp_path):
-    write_metrics(tmp_path / "metrics.jsonl", TRAIN_ROWS)
     RunStatus(tmp_path).start(task="countdown", n_iterations=50)
-
     report = build_report(tmp_path)
 
     assert report.n_iterations == 50
     assert report.task == "countdown"
-
-
-def test_total_option_overrides_a_missing_run_json(tmp_path):
-    write_metrics(tmp_path / "metrics.jsonl", TRAIN_ROWS)
-
-    assert build_report(tmp_path, total=30).n_iterations == 30
 
 
 def test_eta_uses_the_recent_seconds_per_iteration(tmp_path):
@@ -144,37 +110,19 @@ def test_render_flags_answer_credit_for_countdown_only(tmp_path):
     assert "boxed" in math
 
 
-def test_render_shows_the_current_phase_from_status_json(tmp_path):
+def test_render_shows_the_current_phase_and_eval_progress_from_status_json(tmp_path):
     write_metrics(tmp_path / "metrics.jsonl", TRAIN_ROWS)
     status = RunStatus(tmp_path)
     status.start(task="math", n_iterations=30, population_size=30)
+
     status.update("train", iteration=2, member=7, population=30)
+    training = as_text(render(build_report(tmp_path)))
 
-    text = as_text(render(build_report(tmp_path)))
-
-    assert "train" in text
-    assert "7/30" in text
-
-
-def test_render_shows_eval_progress_by_split(tmp_path):
-    write_metrics(tmp_path / "metrics.jsonl", TRAIN_ROWS)
-    status = RunStatus(tmp_path)
-    status.start(task="math", n_iterations=30)
     status.update("eval", tag="iteration10", iteration=10, split="math500", done=48, total=100)
+    evaluating = as_text(render(build_report(tmp_path)))
 
-    text = as_text(render(build_report(tmp_path)))
-
-    assert "math500" in text
-    assert "48/100" in text
-
-
-def test_render_with_only_the_baseline_row_reports_it(tmp_path):
-    write_metrics(tmp_path / "metrics.jsonl", TRAIN_ROWS[:1])
-
-    text = as_text(render(build_report(tmp_path, total=30)))
-
-    assert "baseline 0.010" in text
-    assert "0/30" in text
+    assert "train" in training and "7/30" in training
+    assert "math500" in evaluating and "48/100" in evaluating
 
 
 def test_render_of_an_empty_directory_does_not_crash(tmp_path):

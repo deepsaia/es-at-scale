@@ -22,36 +22,21 @@ def make_params():
     return [torch.randn(16, 8) * 0.02, torch.randn(8) * 0.02]
 
 
-def test_run_iteration_evaluates_once_per_population_member(hyperparams):
-    params = make_params()
-    calls = []
-
-    run_iteration(params, seeds=[1, 2, 3, 4, 5, 6, 7, 8],
-                  evaluate=lambda: calls.append(1) or 0.5, hp=hyperparams)
-
-    assert len(calls) == 8
-
-
-def test_run_iteration_evaluates_each_member_with_perturbed_weights(hyperparams):
+def test_run_iteration_scores_each_member_once_with_its_own_perturbed_weights(hyperparams):
     """If the weights were not perturbed at evaluation time, every member would
     see identical parameters and ES would be sampling nothing."""
     params = make_params()
+    rewards = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    supply = iter(rewards)
     seen = []
 
-    run_iteration(params, seeds=[1, 2, 3, 4, 5, 6, 7, 8],
-                  evaluate=lambda: seen.append(params[0].clone()) or 0.5, hp=hyperparams)
-
-    assert not torch.equal(seen[0], seen[1])
-
-
-def test_run_iteration_returns_one_reward_per_member(hyperparams):
-    params = make_params()
-    rewards = iter([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
-
     result = run_iteration(params, seeds=list(range(8)),
-                           evaluate=lambda: next(rewards), hp=hyperparams)
+                           evaluate=lambda: seen.append(params[0].clone()) or next(supply),
+                           hp=hyperparams)
 
-    assert result.rewards == [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    assert len(seen) == 8
+    assert not torch.equal(seen[0], seen[1])
+    assert result.rewards == rewards
     assert result.mean_reward == pytest.approx(0.45)
 
 

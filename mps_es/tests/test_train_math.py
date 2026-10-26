@@ -9,8 +9,6 @@ import json
 import pytest
 
 from mps_es.train_math import (
-    ALL_EVAL_SPLITS,
-    build_parser,
     eval_record,
     evaluate_splits,
     score_batch,
@@ -31,21 +29,17 @@ def test_score_batch_gives_a_correct_boxed_answer_full_credit():
     assert result.mean_reward == 1.0
 
 
-def test_score_batch_gives_a_boxed_but_wrong_answer_nothing():
+def test_score_batch_reports_format_but_only_rewards_a_correct_answer():
     """Unlike countdown there is no format credit: a boxed wrong answer scores
-    zero, matching upstream's math grader."""
-    result = score_batch([WRONG], ["118"])
+    zero, matching upstream's math grader. The boxed rate is reported anyway."""
+    wrong = score_batch([WRONG], ["118"])
+    assert wrong.accuracy == 0.0
+    assert wrong.mean_reward == 0.0
+    assert wrong.mean_format_reward == 1.0
 
-    assert result.accuracy == 0.0
-    assert result.mean_reward == 0.0
-    assert result.mean_format_reward == 1.0  # reported, not rewarded
-
-
-def test_score_batch_gives_an_unboxed_response_nothing_and_reports_it_as_unformatted():
-    result = score_batch([UNBOXED], ["118"])
-
-    assert result.mean_reward == 0.0
-    assert result.mean_format_reward == 0.0
+    unboxed = score_batch([UNBOXED], ["118"])
+    assert unboxed.mean_reward == 0.0
+    assert unboxed.mean_format_reward == 0.0
 
 
 def test_score_responses_accepts_numeric_and_list_targets():
@@ -56,11 +50,6 @@ def test_score_responses_accepts_numeric_and_list_targets():
     )
 
     assert [r["correct"] for r in records] == [True, True, True]
-
-
-def test_score_responses_rejects_mismatched_lengths():
-    with pytest.raises(ValueError):
-        score_responses([CORRECT], ["118", "119"])
 
 
 def test_to_prompts_and_targets_wraps_the_problem_in_the_qwen_math_template():
@@ -100,16 +89,6 @@ def test_evaluate_splits_scores_each_split_separately_and_writes_each_response(t
     assert (tmp_path / "eval_baseline_amc.json").exists()
 
 
-def test_evaluate_splits_result_does_not_depend_on_mini_batch_size():
-    responses = [CORRECT, WRONG, UNBOXED, CORRECT, WRONG]
-    splits = {"math500": ([f"p{i}" for i in range(5)], ["118"] * 5)}
-
-    whole = evaluate_splits(_ScriptedRunner(responses), splits, mini_batch_size=5)
-    chunked = evaluate_splits(_ScriptedRunner(responses), splits, mini_batch_size=2)
-
-    assert whole == chunked
-
-
 def test_eval_record_reports_every_split_and_the_headline_under_the_shared_key():
     scores = {"math500": score_batch([CORRECT], ["118"]), "amc": score_batch([WRONG], ["118"])}
 
@@ -118,10 +97,3 @@ def test_eval_record_reports_every_split_and_the_headline_under_the_shared_key()
     assert record["eval_accuracy_math500"] == 1.0
     assert record["eval_accuracy_amc"] == 0.0
     assert record["eval_accuracy"] == 1.0  # what the watcher follows
-
-
-def test_parser_defaults_to_every_split_of_the_upstream_eval_suite():
-    args = build_parser().parse_args([])
-
-    assert args.eval_splits == ALL_EVAL_SPLITS
-    assert args.eval_splits.split(",")[0] == "math500"

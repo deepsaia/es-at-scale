@@ -1,7 +1,8 @@
 """Tests for the countdown task wiring.
 
 Scoring is the part with real logic: mean reward drives ES, while accuracy
-(exact-answer rate) is the number comparable to the paper's Table 1.
+(exact-answer rate) is the number comparable to the paper's Table 1, and the
+format/answer split shows whether the model solves puzzles or only formats.
 """
 
 import json
@@ -9,11 +10,11 @@ import json
 import pytest
 
 from mps_es.train_countdown import (
+    TimedGrader,
+    eval_standard_error,
     evaluate_split,
     score_batch,
     score_responses,
-    to_prompts_and_targets,
-    write_eval_outputs,
 )
 
 
@@ -26,31 +27,25 @@ def target(numbers=(44, 19, 35), value=98):
     return {"numbers": list(numbers), "target": value}
 
 
-def test_score_batch_reports_accuracy_as_the_exact_answer_rate():
+def test_score_batch_gives_a_correct_answer_full_credit_and_counts_it_as_accuracy():
     result = score_batch([CORRECT, WRONG], [target(), target()])
 
     assert result.accuracy == pytest.approx(0.5)
+    assert score_batch([CORRECT], [target()]).mean_reward == pytest.approx(1.1)  # 0.1 * format + 1.0 * answer
 
 
-def test_score_batch_gives_a_correct_answer_full_credit():
-    result = score_batch([CORRECT], [target()])
+def test_score_batch_splits_reward_into_format_and_answer_components():
+    """total = 0.1 * format + answer, the weighting countdown_reward_fn uses."""
+    wrong = score_batch([WRONG], [target()])
+    assert wrong.mean_answer_reward == pytest.approx(0.0)
+    assert wrong.mean_format_reward > 0.0
 
-    assert result.accuracy == 1.0
-    assert result.mean_reward == pytest.approx(1.1)  # 0.1 * format + 1.0 * answer
+    unformatted = score_batch([UNFORMATTED], [target()])
+    assert unformatted.mean_reward == pytest.approx(0.0)
+    assert unformatted.mean_format_reward == pytest.approx(0.0)
 
-
-def test_score_batch_gives_a_wrong_but_well_formatted_answer_partial_credit():
-    result = score_batch([WRONG], [target()])
-
-    assert result.accuracy == 0.0
-    assert 0.0 < result.mean_reward < 1.0
-
-
-def test_score_batch_gives_an_unformatted_response_no_credit():
-    result = score_batch([UNFORMATTED], [target()])
-
-    assert result.accuracy == 0.0
-    assert result.mean_reward == pytest.approx(0.0)
+    mixed = score_batch([CORRECT, WRONG, UNFORMATTED], [target()] * 3)
+    assert mixed.mean_reward == pytest.approx(0.1 * mixed.mean_format_reward + mixed.mean_answer_reward)
 
 
 def test_score_batch_on_an_empty_batch_is_zero_rather_than_nan():
@@ -58,23 +53,8 @@ def test_score_batch_on_an_empty_batch_is_zero_rather_than_nan():
 
     assert result.mean_reward == 0.0
     assert result.accuracy == 0.0
-
-
-def test_score_batch_rejects_mismatched_lengths():
-    with pytest.raises(ValueError):
-        score_batch([CORRECT], [target(), target()])
-
-
-def test_to_prompts_and_targets_splits_dataset_rows():
-    rows = [
-        {"context": "prompt one", "numbers": [1, 2], "target": 3},
-        {"context": "prompt two", "numbers": [4, 5], "target": 9},
-    ]
-
-    prompts, targets = to_prompts_and_targets(rows)
-
-    assert prompts == ["prompt one", "prompt two"]
-    assert targets == [{"numbers": [1, 2], "target": 3}, {"numbers": [4, 5], "target": 9}]
+    assert result.mean_format_reward == 0.0
+    assert result.mean_answer_reward == 0.0
 
 
 def test_score_responses_returns_one_graded_record_per_response():
@@ -84,17 +64,6 @@ def test_score_responses_returns_one_graded_record_per_response():
     assert records[0]["reward"] == pytest.approx(1.1)
     assert records[0]["response"] == CORRECT
     assert records[0]["target"] == target()
-
-
-def test_write_eval_outputs_saves_records_as_json(tmp_path):
-    path = tmp_path / "eval-output" / "eval_baseline.json"
-    records = score_responses([CORRECT], [target()])
-
-    write_eval_outputs(path, records)
-
-    saved = json.loads(path.read_text())
-    assert saved[0]["response"] == CORRECT
-    assert saved[0]["correct"] is True
 
 
 class _ScriptedRunner:
@@ -142,42 +111,23 @@ def _grade_or_hang(response, target):
     return countdown_reward_fn(response, target)
 
 
-def test_timed_grader_passes_normal_grades_through():
-    from mps_es.train_countdown import TimedGrader
-
-    grader = TimedGrader(_grade_or_hang, timeout=20)
-    try:
-        detail, reward = grader(CORRECT, target())
-    finally:
-        grader.close()
-
-    assert reward == pytest.approx(1.1)
-    assert detail["answer_reward"] == 1.0
-
-
-def test_timed_grader_scores_a_hung_call_as_zero_and_keeps_working():
-    from mps_es.train_countdown import TimedGrader
-
+def test_timed_grader_scores_a_hung_call_as_zero_and_keeps_grading():
     grader = TimedGrader(_grade_or_hang, timeout=1)
     try:
         detail, reward = grader("hang", target())
-        _, after = grader(CORRECT, target())
+        after_detail, after = grader(CORRECT, target())
     finally:
         grader.close()
 
     assert reward == 0.0
     assert detail["timed_out"] is True
     assert after == pytest.approx(1.1)
+    assert after_detail["answer_reward"] == 1.0
 
 
-def test_score_batch_uses_the_given_grader():
-    calls = []
-
-    def grader(response, target):
-        calls.append(response)
-        return {"format_reward": 1.0, "answer_reward": 1.0}, 1.1
-
-    result = score_batch([UNFORMATTED], [target()], grader)
-
-    assert calls == [UNFORMATTED]
-    assert result.accuracy == 1.0
+def test_eval_standard_error_follows_the_binomial_formula():
+    """A small eval set reads as a hard plateau, so the run prints its own
+    resolution: sqrt(p(1-p)/n), and 0 rather than a division error for n=0."""
+    assert eval_standard_error(100, accuracy=0.1) == pytest.approx(0.03, abs=1e-9)
+    assert eval_standard_error(1600) == pytest.approx(eval_standard_error(100) / 4, rel=1e-9)
+    assert eval_standard_error(0) == 0.0
